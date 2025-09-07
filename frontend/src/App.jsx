@@ -8,6 +8,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Homepage />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="*" element={<div>Page Not Found</div>} />
       </Routes>
     </Router>
   );

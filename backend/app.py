@@ -44,7 +44,7 @@ TEMP_STORAGE_DURATION = 3600
 
 # Hugging Face Configuration - Use environment variables
 HF_API_TOKEN = os.getenv("HF_API_TOKEN", "")  
-HF_MODEL_ENDPOINT = os.getenv("HF_MODEL_ENDPOINT", "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-Fill-dev")
+HF_MODEL_ENDPOINT = os.getenv("HF_MODEL_ENDPOINT")
 
 # In-memory temporary storage for processed images
 temp_storage = {}
@@ -140,18 +140,13 @@ class HuggingFaceAPI:
                 "Authorization": f"Bearer {HF_API_TOKEN}"
             }
             
-            if "instruct-pix2pix" in HF_MODEL_ENDPOINT.lower():
-                files = {
-                    'file': ('image.jpg', image_bytes, 'image/jpeg')
-                }
-                data = {'inputs': prompt}
-                response = requests.post(HF_MODEL_ENDPOINT, headers=headers, files=files, data=data, timeout=60)
-                
-            elif "flux" in HF_MODEL_ENDPOINT.lower() or "fill" in HF_MODEL_ENDPOINT.lower():
-                files = {
+            prompt = "Remove all the InkMarks/penmark/handwritten and enhance texture naturally"
+            
+            files = {
                     'inputs': ('image.jpg', image_bytes, 'image/jpeg')
                 }
-                data = {
+                
+            data = {
                     'parameters': json.dumps({
                         'prompt': prompt,
                         'guidance_scale': 7.5,
@@ -159,17 +154,8 @@ class HuggingFaceAPI:
                         'negative_prompt': 'blurry, low quality, distorted, watermark'
                     })
                 }
-                response = requests.post(HF_MODEL_ENDPOINT, headers=headers, files=files, data=data, timeout=60)
+            response = requests.post(HF_MODEL_ENDPOINT, headers=headers, files=files, data=data, timeout=60)
                 
-            else:
-                files = {
-                    'file': ('image.jpg', image_bytes, 'image/jpeg')
-                }
-                data = {
-                    'inputs': prompt,
-                    'parameters': json.dumps({'guidance_scale': 7.5, 'num_inference_steps': 50})
-                }
-                response = requests.post(HF_MODEL_ENDPOINT, headers=headers, files=files, data=data, timeout=60)
             
             if response.status_code == 200:
                 content_type = response.headers.get('content-type', '')
@@ -260,3 +246,55 @@ if is_main_worker or app.debug:
     cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
     cleanup_thread.start()
     logger.info("Started cleanup thread")
+
+@app.route("/api/process-image", methods=["POST"])
+# @limiter.limit("10/minute")
+def process_image():
+    try:
+        # Check if file is in request.files
+        if 'file' in request.files:
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({"error": "Empty filename"}), 400
+            image_bytes = file.read()
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+
+        # Check if JSON contains base64 image
+        elif request.is_json and 'image' in request.json:
+            base64_image = request.json['image']
+            if ',' in base64_image:
+                base64_image = base64_image.split(',')[1]
+
+        else:
+            return jsonify({"error": "No image provided"}), 400
+
+        # Optimize image for API
+        buffered, output_format, original_format = ImageProcessor.optimize_image_for_api(base64_image)
+
+        # Send to Hugging Face API
+        result_base64 = HuggingFaceAPI.process_image_with_editing_model(
+            buffered.getvalue(),
+            prompt="Remove all the InkMarks/penmark/handwritten and enhance texture naturally"
+        )
+
+        # Store temporarily
+        image_id = TempStorage.store_image(result_base64, format_type=output_format)
+
+        return jsonify({"image_id": image_id, "image": result_base64})
+
+    except Exception as e:
+        logger.error(f"Error in /api/process-image: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/download/<image_id>", methods=["GET"])
+def download_image(image_id):
+    image_base64, format_type = TempStorage.retrieve_image(image_id)
+    if not image_base64:
+        return jsonify({"error": "Image not found or expired"}), 404
+
+    image_bytes = base64.b64decode(image_base64)
+    return send_file(io.BytesIO(image_bytes), mimetype=f"image/{format_type}", download_name=f"cleaned_image.{format_type}")
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
