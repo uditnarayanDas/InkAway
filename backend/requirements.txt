@@ -1,3 +1,8 @@
 flask
 requests
 python-dotenv
+pillow
+requests
+flask-cors
+werkzeug.utils
+flask_limiter
