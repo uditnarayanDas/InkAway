@@ -16,45 +16,25 @@ import axios from "axios";
 
 const Dashboard = () => {
   const [processedUrl, setProcessedUrl] = useState(null);
-  const [uploadedFileUrl, setUploadedFileUrl] = useState(null);
+  const [originalUrl, setOriginalUrl] = useState(null);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isProcessed, setIsProcessed] = useState(false);
   const [showBefore, setShowBefore] = useState(true);
   const [dragActive, setDragActive] = useState(false);
+  const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    let previewUrl;
-    if (uploadedFile) {
-      previewUrl = URL.createObjectURL(uploadedFile);
-    }
-    return () => {
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-      }
-    };
-  }, [uploadedFile]);
-
+  // Cleanup URLs on unmount
   useEffect(() => {
     return () => {
-      if (processedUrl) {
+      if (originalUrl) URL.revokeObjectURL(originalUrl);
+      if (processedUrl && processedUrl.startsWith('blob:')) {
         URL.revokeObjectURL(processedUrl);
       }
     };
-  }, [processedUrl]);
-
-  useEffect(() => {
-    if(!uploadedFile) return;
-
-    const url = URL.createObjectURL(uploadedFile);
-    setProcessedUrl(url);
-
-    return () => URL.revokeObjectURL(url);
-
-  }, [uploadedFile]);
-
+  }, [originalUrl, processedUrl]);
 
   const handleDrag = useCallback((e) => {
     e.preventDefault();
@@ -66,7 +46,6 @@ const Dashboard = () => {
     }
   }, []);
 
-
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -77,44 +56,76 @@ const Dashboard = () => {
     }
   }, []);
 
-  const handleFile = (file) => {
-    if (file && file.type.startsWith("image/")) {
-      setUploadedFile(file);
-      setIsProcessed(false);
+  const handleFile = async (file) => {
+    // Validate file
+    if (!file) return;
+    
+    if (!file.type.startsWith("image/")) {
+      setError("Please upload an image file");
+      return;
+    }
 
-      // Simulate processing
-      setIsProcessing(true);
+    if (file.size > 10 * 1024 * 1024) {
+      setError("File size must be less than 10MB");
+      return;
+    }
 
-      const formData = new FormData();
-      formData.append("file", file);
+    setError(null);
+    setUploadedFile(file);
+    setIsProcessed(false);
+    
+    // Create preview URL for original image
+    const originalPreviewUrl = URL.createObjectURL(file);
+    setOriginalUrl(originalPreviewUrl);
 
-      axios
-        .post("http://localhost:5000/api/process-image", formData, {
+    // Start processing
+    setIsProcessing(true);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const response = await axios.post(
+        "http://localhost:5000/api/process-image",
+        formData,
+        {
           headers: { "Content-Type": "multipart/form-data" },
-        })
-        .then((response) => {
-          const { image } = response.data;
-          if (image) {
-            const byteString = atob(image.split(",")[1]);
-            const ab = new ArrayBuffer(byteString.length);
-            const ia = new Uint8Array(ab);
-            for (let i = 0; i < byteString.length; i++) {
-              ia[i] = byteString.charCodeAt(i);
-            }
-            const blob = new Blob([ab], { type: "image/jpeg" });
-            const blobUrl = URL.createObjectURL(blob);
+          timeout: 30000, // 30 second timeout
+        }
+      );
 
-            setProcessedUrl(blobUrl); // You need to define this state
-            setIsProcessing(false);
-            setIsProcessed(true);
-            setShowBefore(false);
-          }
-        })
-        .catch((err) => {
-          console.error(err);
-          setIsProcessing(false);
-          alert("Failed to process image.");
-        });
+      if (response.data && response.data.image) {
+        // The backend now returns properly formatted base64
+        if (response.data.image.startsWith('data:image')) {
+          setProcessedUrl(response.data.image);
+        } else {
+          // Fallback if backend doesn't include data URI prefix
+          setProcessedUrl(`data:image/jpeg;base64,${response.data.image}`);
+        }
+        setIsProcessed(true);
+        setShowBefore(false);
+      } else {
+        throw new Error("Invalid response from server");
+      }
+    } catch (err) {
+      console.error("Processing error:", err);
+      let errorMessage = "Failed to process image. ";
+      
+      if (err.code === 'ECONNABORTED') {
+        errorMessage += "Request timed out.";
+      } else if (err.response?.data?.error) {
+        errorMessage += err.response.data.error;
+      } else if (err.message) {
+        errorMessage += err.message;
+      } else {
+        errorMessage += "Please try again.";
+      }
+      
+      setError(errorMessage);
+      setProcessedUrl(null);
+      setIsProcessed(false);
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -125,23 +136,43 @@ const Dashboard = () => {
   };
 
   const resetUpload = () => {
+    // Cleanup URLs
+    if (originalUrl) URL.revokeObjectURL(originalUrl);
+    if (processedUrl && processedUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(processedUrl);
+    }
+    
+    // Reset state
     setUploadedFile(null);
+    setOriginalUrl(null);
+    setProcessedUrl(null);
     setIsProcessing(false);
     setIsProcessed(false);
     setShowBefore(true);
+    setError(null);
+    
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
   };
 
   const downloadResult = () => {
-    // Simulate download
     if (!processedUrl) return;
+    
     const link = document.createElement("a");
-
     link.href = processedUrl;
-    link.download = `cleaned_${uploadedFile?.name || "document"}`;
+    link.download = `cleaned_${uploadedFile?.name || "image.jpg"}`;
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
+  };
+
+  // Get current display image
+  const getCurrentImageUrl = () => {
+    if (showBefore || !processedUrl) {
+      return originalUrl;
+    }
+    return processedUrl;
   };
 
   return (
@@ -149,8 +180,7 @@ const Dashboard = () => {
       style={{
         minHeight: "100vh",
         width: "100%",
-        background:
-          "linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%)",
+        backgroundImage: "linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%)",
         position: "relative",
         overflow: "hidden",
       }}
@@ -171,7 +201,7 @@ const Dashboard = () => {
             left: "5%",
             width: "200px",
             height: "200px",
-            background: "rgba(168, 85, 247, 0.08)",
+            backgroundColor: "rgba(168, 85, 247, 0.08)",
             borderRadius: "50%",
             filter: "blur(60px)",
             animation: "pulse 4s ease-in-out infinite",
@@ -184,7 +214,7 @@ const Dashboard = () => {
             right: "5%",
             width: "150px",
             height: "150px",
-            background: "rgba(59, 130, 246, 0.08)",
+            backgroundColor: "rgba(59, 130, 246, 0.08)",
             borderRadius: "50%",
             filter: "blur(60px)",
             animation: "pulse 4s ease-in-out infinite",
@@ -198,7 +228,7 @@ const Dashboard = () => {
         style={{
           position: "relative",
           zIndex: 20,
-          background: "rgba(255, 255, 255, 0.05)",
+          backgroundColor: "rgba(255, 255, 255, 0.05)",
           backdropFilter: "blur(20px)",
           borderBottom: "1px solid rgba(255, 255, 255, 0.1)",
           padding: "0 16px",
@@ -218,7 +248,7 @@ const Dashboard = () => {
           <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
             <button
               style={{
-                background: "rgba(255, 255, 255, 0.1)",
+                backgroundColor: "rgba(255, 255, 255, 0.1)",
                 border: "1px solid rgba(255, 255, 255, 0.2)",
                 borderRadius: "12px",
                 padding: "8px",
@@ -229,10 +259,10 @@ const Dashboard = () => {
                 transition: "all 0.2s ease",
               }}
               onMouseEnter={(e) =>
-                (e.target.style.background = "rgba(255, 255, 255, 0.15)")
+                (e.currentTarget.style.backgroundColor = "rgba(255, 255, 255, 0.15)")
               }
               onMouseLeave={(e) =>
-                (e.target.style.background = "rgba(255, 255, 255, 0.1)")
+                (e.currentTarget.style.backgroundColor = "rgba(255, 255, 255, 0.1)")
               }
               onClick={() => navigate("/")}
             >
@@ -243,7 +273,7 @@ const Dashboard = () => {
                 style={{
                   width: "32px",
                   height: "32px",
-                  background: "linear-gradient(to right, #a855f7, #ec4899)",
+                  backgroundImage: "linear-gradient(to right, #a855f7, #ec4899)",
                   borderRadius: "8px",
                   display: "flex",
                   alignItems: "center",
@@ -274,7 +304,7 @@ const Dashboard = () => {
               <button
                 onClick={resetUpload}
                 style={{
-                  background: "rgba(255, 255, 255, 0.1)",
+                  backgroundColor: "rgba(255, 255, 255, 0.1)",
                   border: "1px solid rgba(255, 255, 255, 0.2)",
                   color: "white",
                   padding: "8px 16px",
@@ -289,7 +319,7 @@ const Dashboard = () => {
             )}
             <button
               style={{
-                background: "linear-gradient(to right, #9333ea, #ec4899)",
+                backgroundImage: "linear-gradient(to right, #9333ea, #ec4899)",
                 color: "white",
                 padding: "8px 16px",
                 borderRadius: "12px",
@@ -316,6 +346,24 @@ const Dashboard = () => {
         }}
       >
         <div style={{ maxWidth: "1280px", margin: "0 auto" }}>
+          {/* Error Message */}
+          {error && (
+            <div
+              style={{
+                maxWidth: "800px",
+                margin: "0 auto 24px",
+                padding: "16px",
+                backgroundColor: "rgba(239, 68, 68, 0.1)",
+                border: "1px solid rgba(239, 68, 68, 0.3)",
+                borderRadius: "12px",
+                color: "#fca5a5",
+                textAlign: "center",
+              }}
+            >
+              {error}
+            </div>
+          )}
+
           {!uploadedFile ? (
             /* Upload Area */
             <div
@@ -346,9 +394,9 @@ const Dashboard = () => {
                     lineHeight: "1.6",
                   }}
                 >
-                  Drag and drop your photo or PDF, or click to browse. Our AI
-                  will automatically detect and remove signatures, pen marks,
-                  and handwritten text.
+                  Drag and drop your photo, or click to browse. Our AI will
+                  automatically detect and remove signatures, pen marks, and
+                  handwritten text.
                 </p>
               </div>
 
@@ -365,8 +413,8 @@ const Dashboard = () => {
                   }`,
                   borderRadius: "24px",
                   padding: window.innerWidth >= 768 ? "80px 40px" : "60px 20px",
-                  background: dragActive
-                    ? "rgba(192, 132, 252, 0.1)"
+                  backgroundImage: dragActive
+                    ? "linear-gradient(135deg, rgba(192, 132, 252, 0.1), rgba(192, 132, 252, 0.1))"
                     : "linear-gradient(135deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.1))",
                   backdropFilter: "blur(20px)",
                   cursor: "pointer",
@@ -378,7 +426,7 @@ const Dashboard = () => {
                   style={{
                     width: window.innerWidth >= 768 ? "120px" : "80px",
                     height: window.innerWidth >= 768 ? "120px" : "80px",
-                    background: "rgba(168, 85, 247, 0.2)",
+                    backgroundColor: "rgba(168, 85, 247, 0.2)",
                     borderRadius: "50%",
                     display: "flex",
                     alignItems: "center",
@@ -412,7 +460,7 @@ const Dashboard = () => {
                     marginBottom: "24px",
                   }}
                 >
-                  Supports JPG, PNG, PDF • Max size 10MB
+                  Supports JPG, PNG, GIF, BMP, WebP • Max size 10MB
                 </p>
                 <div
                   style={{
@@ -694,7 +742,7 @@ const Dashboard = () => {
                         backgroundRepeat: "no-repeat",
                         backgroundPosition: "center",
                         position: "relative",
-                        
+
                       }}
                     >
                       {isProcessed && !showBefore && (
