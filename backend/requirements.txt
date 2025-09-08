@@ -6,3 +6,4 @@ requests
 flask-cors
 werkzeug.utils
 flask_limiter
+gradio_client

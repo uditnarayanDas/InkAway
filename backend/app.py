@@ -18,6 +18,7 @@ import hashlib
 import json
 from werkzeug.utils import secure_filename
 import mimetypes
+from gradio_client import Client, handle_file
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -76,7 +77,7 @@ class ImageProcessor:
 
                 # Fix: ensure it's an image MIME type
                 mime_type = Image.open(io.BytesIO(image_data)).get_format_mimetype()
-                if not mime_type or not mime_type.startswith("image/"):
+                if not mime_type or (mime_type and not mime_type.startswith("image/")):
                     return False, "Unsupported file type", None
 
                 format_type = img.format.lower() if img.format else 'jpeg'
@@ -133,65 +134,34 @@ class HuggingFaceAPI:
     @staticmethod
     def process_image_with_editing_model(image_bytes, prompt):
         try:
-            if not HF_API_TOKEN:
-                raise Exception("HF_API_TOKEN not configured. Please set your Hugging Face API token.")
-            
-            headers = {
-                "Authorization": f"Bearer {HF_API_TOKEN}"
-            }
-            
-            prompt = "Remove all the InkMarks/penmark/handwritten and enhance texture naturally"
-            
-            files = {
-                    'inputs': ('image.jpg', image_bytes, 'image/jpeg')
-                }
-                
-            data = {
-                    'parameters': json.dumps({
-                        'prompt': prompt,
-                        'guidance_scale': 7.5,
-                        'num_inference_steps': 30,
-                        'negative_prompt': 'blurry, low quality, distorted, watermark'
-                    })
-                }
-            response = requests.post(HF_MODEL_ENDPOINT, headers=headers, files=files, data=data, timeout=60)
-                
-            
-            if response.status_code == 200:
-                content_type = response.headers.get('content-type', '')
-                if 'image' in content_type:
-                    return base64.b64encode(response.content).decode('utf-8')
-                elif 'json' in content_type:
-                    result = response.json()
-                    if isinstance(result, list) and len(result) > 0:
-                        if 'image' in result[0]:
-                            return result[0]['image']
-                        elif 'base64' in result[0]:
-                            return result[0]['base64']
-                    elif isinstance(result, dict):
-                        if 'image' in result:
-                            return result['image']
-                        elif 'output' in result:
-                            return result['output']
-                    logger.error(f"Unexpected JSON response: {json.dumps(result)[:500]}")
-                    raise Exception("Could not extract image from API response")
-                else:
-                    return base64.b64encode(response.content).decode('utf-8')
-            elif response.status_code == 503:
-                raise Exception("Model is loading. Please try again later.")
-            else:
-                error_msg = f"API error: {response.status_code}"
-                try:
-                    error_detail = response.json()
-                    error_msg += f" - {error_detail.get('error', response.text[:200])}"
-                except:
-                    error_msg += f" - {response.text[:200]}"
-                raise Exception(error_msg)
-                
-        except requests.exceptions.Timeout:
-            raise Exception("API request timed out. Please try again.")
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"API request failed: {str(e)}")
+            # Save image temporarily
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                tmp.write(image_bytes)
+                tmp_path = tmp.name
+
+            # Call Gradio Client
+            client = Client(HF_MODEL_ENDPOINT)
+            result = client.predict(
+                input_image=handle_file(tmp_path),
+                prompt=prompt,
+                seed=0,
+                randomize_seed=True,
+                guidance_scale=2.5,
+                steps=28,
+                api_name="/infer"
+            )
+
+            # Cleanup temp file
+            os.remove(tmp_path)
+
+            # Extract result
+            output_dict = result[0]  # first element is the output image dict
+            output_path = output_dict["path"]
+
+            # Read result and return as base64
+            with open(output_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+
         except Exception as e:
             logger.error(f"Hugging Face API error: {str(e)}")
             raise

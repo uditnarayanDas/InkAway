@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback, use } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   Upload,
   Download,
@@ -687,13 +687,14 @@ const Dashboard = () => {
                   {uploadedFile?.type.startsWith("image/") ? (
                     <div
                       style={{
-                        width: "100%",
-                        height: "100%",
+                        width: "300px",
+                        height: "300px",
                         background: `url(${showBefore ? URL.createObjectURL(uploadedFile) : processedUrl})`,
                         backgroundSize: "contain",
                         backgroundRepeat: "no-repeat",
                         backgroundPosition: "center",
                         position: "relative",
+                        
                       }}
                     >
                       {isProcessed && !showBefore && (
